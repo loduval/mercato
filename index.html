@@ -357,7 +357,9 @@
     <p class="center" style="margin-bottom:16px"><button class="btn alt sm" style="width:auto;display:inline-flex;padding:9px 16px" onclick="toggleEnhance()"><span id="enhLabel">✨ Améliorer</span></button></p>
     <div class="field"><label>Collection</label><div class="col-pick" id="colPick"></div></div>
     <div class="field"><label>Nom ou numéro <span class="muted" style="text-transform:none">(facultatif)</span></label>
-      <input type="text" id="cardLabel" placeholder="Mbappé, n°45, Pikachu…" autocomplete="off"></div>
+      <input type="text" id="cardLabel" placeholder="Mbappé, n°45, Pikachu…" autocomplete="off">
+      <button class="btn alt sm" id="ocrBtn" style="margin-top:8px;width:auto;display:inline-flex;padding:9px 16px" onclick="readCard()">📖 Lire la carte</button>
+      <div class="muted" id="ocrHint" style="font-size:12px;margin-top:7px;line-height:1.45;display:none"></div></div>
     <div class="field"><label>Combien en double ?</label>
       <div class="stepper"><button onclick="bumpQty(-1)">−</button><div class="val" id="qtyVal">1</div><button onclick="bumpQty(1)">+</button></div></div>
     <div class="field"><label class="toggle"><input type="checkbox" id="isSpecial"> Carte spéciale / brillante ✨</label></div>
@@ -665,6 +667,64 @@ function renderColPick(){const w=$('colPick');w.innerHTML='';if(!state.collectio
   state.collections.forEach(c=>{const o=document.createElement('button');o.className='col-opt'+(c.id===addCol?' on':'');o.innerHTML='<span class="em">'+c.em+'</span>'+c.name;
     o.onclick=()=>{addCol=c.id;[...w.children].forEach(x=>x.classList.remove('on'));o.classList.add('on')};w.appendChild(o)})}
 function bumpQty(n){addQty=Math.max(1,Math.min(99,addQty+n));$('qtyVal').textContent=addQty}
+
+/* ---- Lecture de carte : OCR Tesseract.js, gratuit, 100% côté navigateur ---- */
+const TEAMS=['FRANCE','ANGLETERRE','ALLEMAGNE','ESPAGNE','PORTUGAL','ITALIE','BELGIQUE','PAYS BAS','CROATIE','ARGENTINE','BRESIL','URUGUAY','COLOMBIE','MEXIQUE','ETATS UNIS','CANADA','MAROC','SENEGAL','TUNISIE','ALGERIE','CAMEROUN','GHANA','NIGERIA','COTE D IVOIRE','EGYPTE','JAPON','COREE DU SUD','AUSTRALIE','IRAN','ARABIE SAOUDITE','QATAR','SUISSE','POLOGNE','DANEMARK','SUEDE','NORVEGE','SERBIE','AUTRICHE','ECOSSE','PAYS DE GALLES','IRLANDE','TURQUIE','GRECE','UKRAINE','EQUATEUR','PEROU','CHILI','PARAGUAY','COSTA RICA','PANAMA','REPUBLIQUE TCHEQUE','SLOVAQUIE','SLOVENIE','HONGRIE','ROUMANIE','FINLANDE','ISLANDE','CAP VERT','AFRIQUE DU SUD','BURKINA FASO','MALI','GUINEE','GABON','RD CONGO','NOUVELLE ZELANDE'];
+const STOP=new Set(['PANINI','ADRENALYN','FIFA','WORLD','CUP','COUPE','MONDE','FWC','UEFA','EURO','LIGUE','TEAM','MATE','STAR','LIMITED','EDITION','MASTER','OFFICIAL','OFFICIEL','CARD','CARTE','CLUB','TOP']);
+function norm(s){return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z ]/g,' ').replace(/\s+/g,' ').trim();}
+
+let _tessLoading=null;
+function loadTesseract(){
+  if(window.Tesseract) return Promise.resolve(window.Tesseract);
+  if(_tessLoading) return _tessLoading;
+  _tessLoading=new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';s.onload=()=>res(window.Tesseract);s.onerror=()=>rej(new Error('moteur introuvable'));document.head.appendChild(s);});
+  return _tessLoading;
+}
+function ocrSource(){ // niveaux de gris + agrandissement : aide l'OCR
+  const src=croppedCanvas||croppedEnhanced; if(!src) return null;
+  const SC=1.7,W=Math.round(src.width*SC),H=Math.round(src.height*SC);
+  const c=document.createElement('canvas');c.width=W;c.height=H;const x=c.getContext('2d');
+  x.drawImage(src,0,0,W,H);const id=x.getImageData(0,0,W,H),d=id.data;
+  for(let i=0;i<d.length;i+=4){const g=.299*d[i]+.587*d[i+1]+.114*d[i+2];d[i]=d[i+1]=d[i+2]=g;}
+  x.putImageData(id,0,0);return c;
+}
+async function readCard(){
+  const btn=$('ocrBtn'),hint=$('ocrHint');
+  if(!croppedCanvas&&!croppedEnhanced){toast('Prends d\'abord la photo');return;}
+  const src=ocrSource(); if(!src) return;
+  if(!window.Tesseract) toast('Préparation du lecteur (1ʳᵉ fois)…');
+  btn.disabled=true;const old=btn.textContent;btn.textContent='Lecture…';
+  try{
+    const T=await loadTesseract();
+    const{data}=await T.recognize(src,'fra');
+    const words=(data.words||[]).filter(w=>w.text&&w.text.trim());
+    const fullN=norm(data.text);
+    // équipe nationale (la plus longue qui colle)
+    let team=''; for(const t of TEAMS){ if(fullN.includes(t)&&t.length>team.length) team=t; }
+    // numéro : seulement s'il y a un repère (n° / #) pour éviter de prendre une stat
+    let num=''; const m=(data.text||'').match(/(?:n[°ºo]\.?\s?|#)\s?(\d{1,3})\b/i); if(m) num=m[1];
+    // nom = les mots alphabétiques les plus gros (hors équipe / mots parasites)
+    const cand=words.map(w=>({t:w.text.trim(),h:w.bbox?(w.bbox.y1-w.bbox.y0):0,x:w.bbox?w.bbox.x0:0,y:w.bbox?w.bbox.y0:0}))
+      .filter(w=>/[A-Za-zÀ-ÿ]{2,}/.test(w.t)&&!STOP.has(norm(w.t))&&!(team&&team.includes(norm(w.t))));
+    let name='';
+    if(cand.length){
+      const maxH=Math.max(...cand.map(w=>w.h))||1;
+      const big=cand.filter(w=>w.h>=maxH*0.72).sort((a,b)=> Math.abs(a.y-b.y)>maxH*0.6 ? a.y-b.y : a.x-b.x);
+      name=big.slice(0,3).map(w=>w.t).join(' ').replace(/\s+/g,' ').trim();
+    }
+    let label=name||'';
+    if(team) label=(label?label+' ':'')+'('+team+')';
+    if(num) label=(label?label+' ':'')+'#'+num;
+    const raw=(data.text||'').replace(/\s+/g,' ').trim().slice(0,90);
+    hint.style.display='block';
+    if(label){ $('cardLabel').value=label; hint.textContent='Lu : '+raw+' — vérifie / corrige si besoin.'; }
+    else { hint.textContent='Texte peu lisible 🤔 Réessaie (bonne lumière, carte bien à plat) ou écris le nom à la main.'; }
+  }catch(e){
+    hint.style.display='block'; hint.textContent='Lecture impossible (connexion internet ?). Tu peux écrire le nom à la main.';
+  }finally{
+    btn.disabled=false;btn.textContent=old;
+  }
+}
 
 async function saveCard(){
   const thumb=(enhanceOn?croppedEnhanced:croppedCanvas).toDataURL('image/jpeg',.78);
