@@ -370,11 +370,12 @@
   </button>
 </div>
 
-<!-- INBOX -->
+<!-- ÉCHANGES (demandes reçues + échanges à réaliser) -->
 <div class="sheet" id="inboxSheet">
   <div class="grab"></div>
-  <h2 class="anton">Demandes reçues 📩</h2>
-  <div id="inboxList"></div>
+  <h2 class="anton">Mes échanges 🤝</h2>
+  <div id="reqPending"></div>
+  <div id="reqValidated"></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -402,7 +403,7 @@ const SEED=[{id:'cdm26',name:'Coupe du Monde 2026',em:'🏆'},{id:'ligue1',name:
 let state={collections:JSON.parse(JSON.stringify(SEED)), cards:[]}; // cards: en local = les miennes ; en ligne = TOUTES (avec .owner)
 let myName='', activeCol='all', tab='mine';
 let ONLINE=false, db=null;
-let inbox=[]; // demandes reçues
+let allRequests=[]; // toutes les demandes / échanges (en ligne)
 let unsubCards=null, unsubReq=null;
 
 /* ---- stockage local (IndexedDB, repli) ---- */
@@ -443,16 +444,24 @@ function subscribe(){
     state.cards=s.docs.map(d=>({id:d.id,...d.data()}));
     renderAll();
   },e=>console.warn(e));
-  // mes demandes reçues
-  if(myName) watchInbox();
+  // toutes les demandes / échanges
+  watchRequests();
 }
-function watchInbox(){
+function reqStatus(r){ return r.status || (r.done ? 'done' : 'pending'); }
+function watchRequests(){
   if(unsubReq) unsubReq();
-  unsubReq=db.collection('requests').where('to','==',myName).onSnapshot(s=>{
-    inbox=s.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.done);
-    const n=inbox.length; $('bellDot').textContent=n; $('bellDot').classList.toggle('show',n>0);
-    renderInbox();
+  unsubReq=db.collection('requests').onSnapshot(s=>{
+    allRequests=s.docs.map(d=>({id:d.id,...d.data()}));
+    refreshRequests();
   },e=>console.warn(e));
+}
+function refreshRequests(){
+  if(!myName){ $('bellDot').classList.remove('show'); return; }
+  const pending=allRequests.filter(r=>r.to===myName && reqStatus(r)==='pending');
+  const todo=allRequests.filter(r=>(r.from===myName||r.to===myName) && reqStatus(r)==='validated');
+  const n=pending.length+todo.length;
+  $('bellDot').textContent=n; $('bellDot').classList.toggle('show',n>0);
+  renderRequests(pending,todo);
 }
 
 /* =====================================================================
@@ -478,7 +487,7 @@ function closeSheet(){$('scrim').classList.remove('show');document.querySelector
 
 function openName(){$('nameIn').value=myName;openSheet($('nameSheet'));setTimeout(()=>$('nameIn').focus(),200)}
 function saveName(){const n=$('nameIn').value.trim();if(!n){toast('Écris ton prénom 🙂');return}
-  myName=n;saveLocal();renderHeader();if(ONLINE)watchInbox();renderAll();closeSheet();toast('Salut '+n+' ! 👋')}
+  myName=n;saveLocal();renderHeader();if(ONLINE)refreshRequests();renderAll();closeSheet();toast('Salut '+n+' ! 👋')}
 function renderHeader(){$('meBadge').textContent=ini(myName)}
 
 /* collections */
@@ -670,8 +679,8 @@ async function sendRequests(){
   try{
     for(const owner of Object.keys(by)){
       await db.collection('requests').add({
-        from:myName,to:owner,done:false,
-        items:by[owner].map(c=>({label:c.label||c.colName,thumb:c.thumb})),
+        from:myName,to:owner,status:'pending',
+        items:by[owner].map(c=>({cardId:c.id,label:c.label||c.colName,thumb:c.thumb})),
         ts:firebase.firestore.FieldValue.serverTimestamp()
       });
     }
@@ -680,19 +689,51 @@ async function sendRequests(){
   }catch(e){toast('Envoi raté');console.warn(e)}
 }
 
-/* INBOX */
-function openInbox(){renderInbox();openSheet($('inboxSheet'))}
-function renderInbox(){
-  const l=$('inboxList');if(!l)return;
-  if(inbox.length===0){l.innerHTML='<div class="empty" style="padding:30px 10px"><div class="big">📭</div><p>Aucune demande pour le moment.</p></div>';return}
-  l.innerHTML=inbox.map(r=>{
-    const th=(r.items||[]).slice(0,5).map(it=>'<img src="'+it.thumb+'">').join('');
-    const labels=(r.items||[]).map(it=>esc(it.label)).join(', ');
-    return '<div class="req"><div class="thumbs">'+th+'</div><div class="meta"><b>'+esc(r.from)+' veut '+(r.items||[]).length+' carte'+((r.items||[]).length>1?'s':'')+'</b><div class="s">'+labels+'</div></div>'+
-      '<button class="btn cyan sm" style="width:auto;padding:9px 12px" onclick="markDone(\''+r.id+'\')">Échangé ✓</button></div>';
-  }).join('');
+/* ÉCHANGES : demandes reçues (à valider) + échanges validés (à réaliser) */
+function openInbox(){refreshRequests();openSheet($('inboxSheet'))}
+function reqCard(r){
+  const th=(r.items||[]).slice(0,5).map(it=>'<img src="'+it.thumb+'">').join('');
+  const labels=(r.items||[]).map(it=>esc(it.label)).join(', ');
+  return {th,labels};
 }
-async function markDone(id){try{await db.collection('requests').doc(id).update({done:true})}catch(e){}toast('Échange validé 🎉')}
+function renderRequests(pending,todo){
+  const p=$('reqPending'),v=$('reqValidated');if(!p||!v)return;
+  // 1) Demandes reçues (on me demande des cartes) -> Accepter / Refuser
+  let ph='<h3 style="font-size:13px;color:var(--mut);margin:4px 2px 10px;text-transform:uppercase;letter-spacing:.7px">Demandes reçues</h3>';
+  if(pending.length===0){ph+='<p class="muted" style="margin:0 2px 20px">Personne ne t\'a demandé de cartes pour l\'instant.</p>';}
+  else{ph+=pending.map(r=>{const{th,labels}=reqCard(r);
+    return '<div class="req"><div class="thumbs">'+th+'</div><div class="meta"><b>'+esc(r.from)+' veut '+(r.items||[]).length+' carte'+((r.items||[]).length>1?'s':'')+'</b><div class="s">'+labels+'</div></div>'+
+      '<div style="display:flex;flex-direction:column;gap:6px;flex:0 0 auto">'+
+      '<button class="btn cyan sm" style="padding:8px 12px" onclick="acceptExchange(\''+r.id+'\')">Accepter</button>'+
+      '<button class="btn alt sm" style="padding:7px 12px" onclick="refuseRequest(\''+r.id+'\')">Refuser</button></div></div>';
+  }).join('');}
+  p.innerHTML=ph;
+  // 2) Échanges à réaliser (validés, dans les deux sens) -> Fait
+  let vh='<h3 style="font-size:13px;color:var(--mut);margin:20px 2px 10px;text-transform:uppercase;letter-spacing:.7px">Échanges à réaliser</h3>';
+  if(todo.length===0){vh+='<p class="muted" style="margin:0 2px 6px">Aucun échange en attente. 🎉</p>';}
+  else{vh+=todo.map(r=>{const{th,labels}=reqCard(r);const iGive=r.to===myName;const other=iGive?r.from:r.to;
+    const txt=iGive?('Tu donnes à '+esc(other)):(esc(other)+' te donne');
+    return '<div class="req"><div class="thumbs">'+th+'</div><div class="meta"><b>'+txt+'</b><div class="s">'+labels+'</div></div>'+
+      '<button class="btn sm" style="width:auto;padding:8px 12px;flex:0 0 auto" onclick="markExchangeDone(\''+r.id+'\')">Fait ✓</button></div>';
+  }).join('');}
+  v.innerHTML=vh;
+}
+async function acceptExchange(reqId){
+  const r=allRequests.find(x=>x.id===reqId);if(!r)return;
+  // retire les cartes échangées de MA bibliothèque (qty -1, suppression si 0)
+  for(const it of (r.items||[])){
+    let card=null;
+    if(it.cardId) card=state.cards.find(c=>c.id===it.cardId);
+    if(!card && it.thumb) card=state.cards.find(c=>c.owner===myName && c.thumb===it.thumb);
+    if(!card) continue;
+    const nq=(card.qty||1)-1;
+    try{ if(nq<=0) await db.collection('cards').doc(card.id).delete(); else await db.collection('cards').doc(card.id).update({qty:nq}); }catch(e){console.warn(e)}
+  }
+  try{ await db.collection('requests').doc(reqId).update({status:'validated'}); }catch(e){console.warn(e)}
+  toast('Échange accepté ! 🤝');
+}
+async function refuseRequest(reqId){try{await db.collection('requests').doc(reqId).delete()}catch(e){}toast('Demande refusée')}
+async function markExchangeDone(reqId){try{await db.collection('requests').doc(reqId).update({status:'done'})}catch(e){}toast('Échange terminé ! 🎉')}
 
 /* =====================================================================
    INIT
